@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -10,28 +11,170 @@ import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import Icon from '@/components/ui/icon';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
+import { useToast } from '@/hooks/use-toast';
+
+const WITHDRAWALS_API = 'https://functions.poehali.dev/07adb59e-e0e5-4f80-99f6-ac78adc5fac3';
+const ANALYTICS_API = 'https://functions.poehali.dev/484f6806-a14d-47d2-8f7d-e231df22b685';
+
+interface Withdrawal {
+  id: number;
+  user: string;
+  email: string;
+  amount: number;
+  status: string;
+  method: string;
+  paymentDetails: string;
+  date: string;
+  notes?: string;
+}
+
+interface Analytics {
+  stats: {
+    totalWithdrawals: number;
+    pendingCount: number;
+    approvedCount: number;
+    rejectedCount: number;
+    totalAmount: number;
+    approvedAmount: number;
+    avgAmount: number;
+  };
+  monthly: Array<{ month: string; count: number; total: number }>;
+  byMethod: Array<{ method: string; count: number; total: number }>;
+  topUsers: Array<{ name: string; email: string; withdrawalCount: number; totalAmount: number }>;
+}
 
 const Admin = () => {
-  const [withdrawals, setWithdrawals] = useState([
-    { id: 1, user: 'Иван Петров', amount: 5000, status: 'pending', date: '2025-10-28', email: 'ivan@example.com', method: 'Карта' },
-    { id: 2, user: 'Мария Сидорова', amount: 12000, status: 'pending', date: '2025-10-27', email: 'maria@example.com', method: 'QIWI' },
-    { id: 3, user: 'Алексей Иванов', amount: 3500, status: 'approved', date: '2025-10-26', email: 'alex@example.com', method: 'ЮMoney' },
-  ]);
+  const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
+  const [analytics, setAnalytics] = useState<Analytics | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const navigate = useNavigate();
+  const { toast } = useToast();
 
-  const statsData = [
-    { month: 'Июнь', withdrawals: 45, revenue: 125000 },
-    { month: 'Июль', withdrawals: 52, revenue: 148000 },
-    { month: 'Август', withdrawals: 61, revenue: 167000 },
-    { month: 'Сентябрь', withdrawals: 58, revenue: 159000 },
-    { month: 'Октябрь', withdrawals: 69, revenue: 189000 },
-  ];
+  const getAuthToken = () => localStorage.getItem('authToken');
 
-  const handleApprove = (id: number) => {
-    setWithdrawals(prev => prev.map(w => w.id === id ? { ...w, status: 'approved' } : w));
+  useEffect(() => {
+    const token = getAuthToken();
+    if (!token) {
+      navigate('/login');
+      return;
+    }
+    loadData();
+  }, []);
+
+  const loadData = async () => {
+    const token = getAuthToken();
+    if (!token) return;
+
+    try {
+      setLoading(true);
+      
+      const [withdrawalsRes, analyticsRes] = await Promise.all([
+        fetch(WITHDRAWALS_API, {
+          headers: { 'X-Auth-Token': token }
+        }),
+        fetch(ANALYTICS_API, {
+          headers: { 'X-Auth-Token': token }
+        })
+      ]);
+
+      if (withdrawalsRes.ok) {
+        const data = await withdrawalsRes.json();
+        setWithdrawals(data.withdrawals);
+      }
+
+      if (analyticsRes.ok) {
+        const data = await analyticsRes.json();
+        setAnalytics(data);
+      }
+    } catch (error) {
+      toast({
+        title: 'Ошибка загрузки',
+        description: 'Не удалось загрузить данные',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleReject = (id: number) => {
-    setWithdrawals(prev => prev.map(w => w.id === id ? { ...w, status: 'rejected' } : w));
+  const handleStatusUpdate = async (id: number, status: string) => {
+    const token = getAuthToken();
+    if (!token) return;
+
+    try {
+      const response = await fetch(WITHDRAWALS_API, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Auth-Token': token,
+        },
+        body: JSON.stringify({ id, status }),
+      });
+
+      if (response.ok) {
+        toast({
+          title: 'Успешно',
+          description: `Заявка ${status === 'approved' ? 'одобрена' : 'отклонена'}`,
+        });
+        loadData();
+      } else {
+        toast({
+          title: 'Ошибка',
+          description: 'Не удалось обновить статус',
+          variant: 'destructive',
+        });
+      }
+    } catch (error) {
+      toast({
+        title: 'Ошибка сети',
+        description: 'Не удалось подключиться к серверу',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const handleExportExcel = async () => {
+    const token = getAuthToken();
+    if (!token) return;
+
+    setExportingExcel(true);
+    try {
+      const response = await fetch(`${ANALYTICS_API}?format=excel`, {
+        headers: { 'X-Auth-Token': token }
+      });
+
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `analytics_${new Date().toISOString().split('T')[0]}.xlsx`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        
+        toast({
+          title: 'Успешно',
+          description: 'Отчет экспортирован в Excel',
+        });
+      }
+    } catch (error) {
+      toast({
+        title: 'Ошибка экспорта',
+        description: 'Не удалось экспортировать данные',
+        variant: 'destructive',
+      });
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('authToken');
+    localStorage.removeItem('user');
+    navigate('/login');
   };
 
   const getStatusBadge = (status: string) => {
@@ -42,6 +185,14 @@ const Admin = () => {
       default: return null;
     }
   };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <Icon name="Loader2" className="animate-spin text-blue-600" size={48} />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -57,7 +208,7 @@ const Admin = () => {
                 <p className="text-sm text-slate-500">Управление сайтом и заявками</p>
               </div>
             </div>
-            <Button variant="outline" size="sm">
+            <Button variant="outline" size="sm" onClick={handleLogout}>
               <Icon name="LogOut" size={16} className="mr-2" />
               Выйти
             </Button>
@@ -76,9 +227,9 @@ const Admin = () => {
               <Icon name="Wallet" size={16} />
               Заявки на вывод
             </TabsTrigger>
-            <TabsTrigger value="users" className="gap-2">
-              <Icon name="Users" size={16} />
-              Пользователи
+            <TabsTrigger value="analytics" className="gap-2">
+              <Icon name="LineChart" size={16} />
+              Аналитика
             </TabsTrigger>
             <TabsTrigger value="builder" className="gap-2">
               <Icon name="Wrench" size={16} />
@@ -90,101 +241,99 @@ const Admin = () => {
             <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
               <Card>
                 <CardHeader className="pb-3">
-                  <CardDescription>Всего пользователей</CardDescription>
-                  <CardTitle className="text-3xl font-bold">1,247</CardTitle>
+                  <CardDescription>Всего заявок</CardDescription>
+                  <CardTitle className="text-3xl font-bold">
+                    {analytics?.stats.totalWithdrawals || 0}
+                  </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="flex items-center gap-2 text-sm text-green-600">
-                    <Icon name="TrendingUp" size={16} />
-                    <span>+12% за месяц</span>
+                  <div className="flex items-center gap-2 text-sm text-slate-600">
+                    <Icon name="FileText" size={16} />
+                    <span>За все время</span>
                   </div>
                 </CardContent>
               </Card>
 
               <Card>
                 <CardHeader className="pb-3">
-                  <CardDescription>Заявки на вывод</CardDescription>
-                  <CardTitle className="text-3xl font-bold">23</CardTitle>
+                  <CardDescription>Ожидают обработки</CardDescription>
+                  <CardTitle className="text-3xl font-bold text-yellow-600">
+                    {analytics?.stats.pendingCount || 0}
+                  </CardTitle>
                 </CardHeader>
                 <CardContent>
                   <div className="flex items-center gap-2 text-sm text-yellow-600">
                     <Icon name="Clock" size={16} />
-                    <span>Ожидают обработки</span>
+                    <span>Требуют действий</span>
                   </div>
                 </CardContent>
               </Card>
 
               <Card>
                 <CardHeader className="pb-3">
-                  <CardDescription>Выведено средств</CardDescription>
-                  <CardTitle className="text-3xl font-bold">₽189K</CardTitle>
+                  <CardDescription>Одобрено заявок</CardDescription>
+                  <CardTitle className="text-3xl font-bold text-green-600">
+                    {analytics?.stats.approvedCount || 0}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex items-center gap-2 text-sm text-green-600">
+                    <Icon name="CheckCircle2" size={16} />
+                    <span>Успешно выведено</span>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardDescription>Общая сумма выводов</CardDescription>
+                  <CardTitle className="text-3xl font-bold">
+                    ₽{(analytics?.stats.approvedAmount || 0).toLocaleString()}
+                  </CardTitle>
                 </CardHeader>
                 <CardContent>
                   <div className="flex items-center gap-2 text-sm text-blue-600">
                     <Icon name="TrendingUp" size={16} />
-                    <span>+8% за месяц</span>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardDescription>Активных операций</CardDescription>
-                  <CardTitle className="text-3xl font-bold">69</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="flex items-center gap-2 text-sm text-slate-600">
-                    <Icon name="Activity" size={16} />
-                    <span>За октябрь</span>
+                    <span>Одобренные выплаты</span>
                   </div>
                 </CardContent>
               </Card>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {analytics && analytics.monthly.length > 0 && (
               <Card>
                 <CardHeader>
-                  <CardTitle>Динамика выводов</CardTitle>
-                  <CardDescription>Количество заявок по месяцам</CardDescription>
+                  <CardTitle>Динамика заявок по месяцам</CardTitle>
+                  <CardDescription>Количество и объем выводов</CardDescription>
                 </CardHeader>
                 <CardContent>
                   <ResponsiveContainer width="100%" height={300}>
-                    <LineChart data={statsData}>
+                    <LineChart data={analytics.monthly}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                       <XAxis dataKey="month" stroke="#64748b" fontSize={12} />
                       <YAxis stroke="#64748b" fontSize={12} />
                       <Tooltip contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px' }} />
-                      <Line type="monotone" dataKey="withdrawals" stroke="#0ea5e9" strokeWidth={2} />
+                      <Line type="monotone" dataKey="count" stroke="#0ea5e9" strokeWidth={2} name="Количество" />
                     </LineChart>
                   </ResponsiveContainer>
                 </CardContent>
               </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>Общий объем выводов</CardTitle>
-                  <CardDescription>В рублях по месяцам</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <ResponsiveContainer width="100%" height={300}>
-                    <BarChart data={statsData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                      <XAxis dataKey="month" stroke="#64748b" fontSize={12} />
-                      <YAxis stroke="#64748b" fontSize={12} />
-                      <Tooltip contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px' }} />
-                      <Bar dataKey="revenue" fill="#0ea5e9" radius={[8, 8, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </CardContent>
-              </Card>
-            </div>
+            )}
           </TabsContent>
 
           <TabsContent value="withdrawals">
             <Card>
               <CardHeader>
-                <CardTitle>Заявки на вывод средств</CardTitle>
-                <CardDescription>Обработайте запросы пользователей на вывод денежных средств</CardDescription>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle>Заявки на вывод средств</CardTitle>
+                    <CardDescription>Обработайте запросы пользователей</CardDescription>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={loadData}>
+                    <Icon name="RefreshCw" size={16} className="mr-2" />
+                    Обновить
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent>
                 <Table>
@@ -215,7 +364,7 @@ const Admin = () => {
                                 size="sm" 
                                 variant="outline"
                                 className="text-green-600 border-green-200 hover:bg-green-50"
-                                onClick={() => handleApprove(withdrawal.id)}
+                                onClick={() => handleStatusUpdate(withdrawal.id, 'approved')}
                               >
                                 <Icon name="Check" size={16} className="mr-1" />
                                 Одобрить
@@ -224,7 +373,7 @@ const Admin = () => {
                                 size="sm" 
                                 variant="outline"
                                 className="text-red-600 border-red-200 hover:bg-red-50"
-                                onClick={() => handleReject(withdrawal.id)}
+                                onClick={() => handleStatusUpdate(withdrawal.id, 'rejected')}
                               >
                                 <Icon name="X" size={16} className="mr-1" />
                                 Отклонить
@@ -240,19 +389,71 @@ const Admin = () => {
             </Card>
           </TabsContent>
 
-          <TabsContent value="users">
-            <Card>
-              <CardHeader>
-                <CardTitle>Управление пользователями</CardTitle>
-                <CardDescription>Просмотр и управление аккаунтами пользователей</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="text-center py-12 text-slate-500">
-                  <Icon name="Users" size={48} className="mx-auto mb-4 text-slate-300" />
-                  <p>Модуль управления пользователями</p>
-                </div>
-              </CardContent>
-            </Card>
+          <TabsContent value="analytics">
+            <div className="space-y-6">
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle>Детальная аналитика</CardTitle>
+                      <CardDescription>Расширенные отчеты и статистика</CardDescription>
+                    </div>
+                    <Button onClick={handleExportExcel} disabled={exportingExcel}>
+                      {exportingExcel ? (
+                        <Icon name="Loader2" size={16} className="mr-2 animate-spin" />
+                      ) : (
+                        <Icon name="Download" size={16} className="mr-2" />
+                      )}
+                      Экспорт в Excel
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-6">
+                  {analytics && (
+                    <>
+                      <div>
+                        <h3 className="text-lg font-semibold mb-4">Топ пользователей по объему выводов</h3>
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Имя</TableHead>
+                              <TableHead>Email</TableHead>
+                              <TableHead>Заявок</TableHead>
+                              <TableHead>Сумма</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {analytics.topUsers.map((user, idx) => (
+                              <TableRow key={idx}>
+                                <TableCell className="font-medium">{user.name}</TableCell>
+                                <TableCell>{user.email}</TableCell>
+                                <TableCell>{user.withdrawalCount}</TableCell>
+                                <TableCell className="font-semibold">₽{user.totalAmount.toLocaleString()}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+
+                      {analytics.byMethod.length > 0 && (
+                        <div>
+                          <h3 className="text-lg font-semibold mb-4">Распределение по методам вывода</h3>
+                          <ResponsiveContainer width="100%" height={300}>
+                            <BarChart data={analytics.byMethod}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                              <XAxis dataKey="method" stroke="#64748b" fontSize={12} />
+                              <YAxis stroke="#64748b" fontSize={12} />
+                              <Tooltip contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px' }} />
+                              <Bar dataKey="total" fill="#0ea5e9" radius={[8, 8, 0, 0]} />
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
           </TabsContent>
 
           <TabsContent value="builder">
@@ -287,10 +488,6 @@ const Admin = () => {
                           <Label htmlFor="hero-desc">Описание Hero</Label>
                           <Textarea id="hero-desc" placeholder="Введите описание" rows={4} />
                         </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="cta-text">Текст кнопки</Label>
-                          <Input id="cta-text" placeholder="Например: Начать сейчас" />
-                        </div>
                         <Button className="w-full">
                           <Icon name="Save" size={16} className="mr-2" />
                           Сохранить изменения
@@ -322,10 +519,6 @@ const Admin = () => {
                         <div className="space-y-2">
                           <Label htmlFor="meta-desc">Meta описание</Label>
                           <Textarea id="meta-desc" placeholder="Описание для поисковых систем" rows={3} />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="keywords">Ключевые слова</Label>
-                          <Input id="keywords" placeholder="слово1, слово2, слово3" />
                         </div>
                         <Button className="w-full">
                           <Icon name="Save" size={16} className="mr-2" />
